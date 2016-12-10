@@ -21,7 +21,7 @@ namespace MyProject
         {
             var configuration = new ConfigurationBuilder();
 
-            // the code bellow connect to host and port, read all collections from database amd listen for changes
+            // the code bellow connect to host and port, read all collections from database from third parameter and listen for changes
             configuration.AddCouchDb("your_ip_address", 5984, "configuration", true);
             configuration.AddCouchDb("your_ip_address", 5984, "redirections", true);
 
