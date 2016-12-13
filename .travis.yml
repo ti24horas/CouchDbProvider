@@ -1,0 +1,17 @@
+language: csharp
+dotnet: 1.0.0-preview2-003121
+
+install:
+ - dotnet restore
+
+script:
+ - dotnet build
+
+deploy:
+ provider: script
+ skip_cleanup: true
+ script:
+  - dotnet pack -o ./release && cd release && nuget push *.nupkg $NUGET_API_KEY
+ on:
+    branch: master
+
