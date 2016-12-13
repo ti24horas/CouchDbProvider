@@ -1,8 +1,8 @@
 language: csharp
-dist: xenial
+#dist: xenial
 matrix:
   include:
-    - dotnet: 1.0.0-preview2-003121
+    - dotnet: 1.0.0-preview2-1-003177
       mono: none
       env: DOTNETCORE=1
     - mono: latest
