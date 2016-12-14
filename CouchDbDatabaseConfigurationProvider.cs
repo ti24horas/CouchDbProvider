@@ -53,9 +53,10 @@
         public IEnumerable<string> GetChildKeys(IEnumerable<string> earlierKeys, string parentPath)
         {
             var configName = string.IsNullOrWhiteSpace(parentPath) ? string.Empty : parentPath + ConfigurationPath.KeyDelimiter;
-            return from x in this.data
+            var all = earlierKeys.Concat(from x in this.data
                    where x.Key.StartsWith(configName)
-                   select Segment(x.Key, configName.Length);
+                   select Segment(x.Key, configName.Length)).Distinct();
+            return all;
         }
 
         public bool TryGet(string key, out string value)
