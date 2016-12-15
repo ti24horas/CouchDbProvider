@@ -18,7 +18,7 @@
     {
         private readonly string databasename;
 
-        private readonly IDictionary<string, JToken> data = new Dictionary<string, JToken>();
+        private IDictionary<string, JToken> data = new Dictionary<string, JToken>();
 
         private readonly Uri uri;
 
@@ -101,6 +101,7 @@
             var s = request.Result.Content.ReadAsStringAsync().Result;
 
             var json = JObject.Parse(s);
+            var newData = new Dictionary<string, JToken>();
 
             this.EnterContext(this.databasename);
             foreach (var t in json["rows"].Select(d => new { _id = d["id"].Value<string>(), doc = d["doc"] }))
@@ -112,13 +113,15 @@
                         var o = doc as JObject;
 
                         this.EnterContext(t._id);
-                        this.VisitObject(o);
+                        this.VisitObject(o, newData);
                         this.ExitContext();
                         break;
                 }
             }
 
             this.ExitContext();
+
+            Interlocked.Exchange(ref this.data, newData);
         }
 
         public IConfigurationProvider Build(IConfigurationBuilder builder)
@@ -137,7 +140,7 @@
             return num >= 0 ? key.Substring(prefixLength, num - prefixLength) : key.Substring(prefixLength);
         }
 
-        private void VisitObject(JObject token)
+        private void VisitObject(JObject token, IDictionary<string, JToken> data)
         {
             foreach (var k in token.Properties())
             {
@@ -149,11 +152,11 @@
                 this.EnterContext(k.Name);
                 if (k.Value.Type == JTokenType.Object)
                 {
-                    this.VisitObject(k.Value as JObject);
+                    this.VisitObject(k.Value as JObject, data);
                 }
                 else
                 {
-                    this.data[this.currentPath] = k.Value.Value<string>();
+                    data[this.currentPath] = k.Value;
                 }
 
                 this.ExitContext();
