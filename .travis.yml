@@ -17,7 +17,8 @@ deploy:
  provider: script
  skip_cleanup: true
  script:
-  - dotnet pack -o ./release && cd release && nuget push *.nupkg $NUGET_API_KEY
+  - echo $NUGET_API_KEY
+  - dotnet pack -o ./release && cd release && nuget push release/*.nupkg $NUGET_API_KEY
  on:
     branch: master
 
