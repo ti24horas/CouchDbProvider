@@ -8,7 +8,7 @@ matrix:
       mono: none
       env: DOTNETCORE=1
 install:
- - dotnet restore
+ - dotnet restore -f netstandard16
 
 script:
  - dotnet build -f netstandard16
@@ -17,7 +17,7 @@ deploy:
  provider: script
  skip_cleanup: true
  script:
-  - dotnet pack -o ./release && nuget push release/*.nupkg $NUGET_API_KEY
+  - dotnet pack -f netstandard16 -o ./release && nuget push release/*.nupkg $NUGET_API_KEY
  on:
     branch: master
 
