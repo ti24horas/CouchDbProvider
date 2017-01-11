@@ -5,7 +5,7 @@ sudo: required
 matrix:
   include:
     - dotnet: 1.0.0-preview2-003131
-	  mono: none
+      mono: none
       env: DOTNETCORE=1
 install:
  - dotnet restore
