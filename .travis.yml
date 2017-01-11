@@ -5,19 +5,19 @@ sudo: required
 matrix:
   include:
     - dotnet: 1.0.0-preview2-003131
-      mono: latest
+      # mono: latest
       env: DOTNETCORE=1
 install:
  - dotnet restore
 
 script:
- - dotnet build
+ - dotnet build -f netstandard16
 
 deploy:
  provider: script
  skip_cleanup: true
  script:
-  - dotnet pack -o ./release && cd release && nuget push release/*.nupkg $NUGET_API_KEY
+  - dotnet pack -o ./release && nuget push release/*.nupkg $NUGET_API_KEY
  on:
     branch: master
 
