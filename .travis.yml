@@ -8,7 +8,7 @@ matrix:
       mono: none
       env: DOTNETCORE=1
 install:
- - dotnet restore -f netstandard16
+ - dotnet restore
 
 script:
  - dotnet build -f netstandard16
