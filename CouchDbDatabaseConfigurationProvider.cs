@@ -1,280 +1,123 @@
 ﻿namespace Microsoft.Extensions.Configuration.CouchDb
 {
     using System;
+    using System.Collections;
     using System.Collections.Generic;
     using System.IO;
     using System.Linq;
     using System.Net.Http;
+    using System.Reactive.Disposables;
+    using System.Reactive.Linq;
+    using System.Reactive.Subjects;
     using System.Threading;
     using System.Threading.Tasks;
 
     using Configuration;
 
+    using Microsoft.Extensions.Configuration.Json;
+    using Microsoft.Extensions.FileProviders;
+
     using Newtonsoft.Json.Linq;
 
     using Primitives;
 
-    public class CouchDbDatabaseConfigurationProvider : IConfigurationProvider, IConfigurationSource, IDisposable
+    internal static class CouchDbConfigWatcher
     {
-        private readonly string databasename;
-
-        private IDictionary<string, JToken> data = new Dictionary<string, JToken>();
-
-        private readonly Uri uri;
-
-        private readonly Stack<string> context = new Stack<string>();
-
-        private readonly CouchDbConfigWatcher.CouchDbChangeToken watcher;
-
-        private string currentPath;
-
-        private ConfigurationReloadToken reload;
-
-        public CouchDbDatabaseConfigurationProvider(string host, int port, string databasename, bool reload)
+        public static CouchDbChangeToken Get(string absoluteUrl, Action<string> onreload)
         {
-            this.databasename = databasename;
-            this.uri = new Uri($"http://{host}:{port}/{databasename}");
-            if (reload)
+            return new CouchDbChangeToken(absoluteUrl, onreload);
+        }
+
+        public class CouchDbChangeToken : IDisposable
+        {
+            private readonly string absoluteUrl;
+
+            private readonly Action<string> onreload;
+
+            private readonly CancellationTokenSource cts;
+
+            private bool running;
+
+            public CouchDbChangeToken(string absoluteUrl, Action<string> onreload)
             {
-                this.watcher = CouchDbConfigWatcher.Get(
-                  this.uri + "/_changes?feed=continuous",
-                  () =>
-                  {
-                      this.Load();
-                      this.reload.OnReload();
-                  });
+                this.absoluteUrl = absoluteUrl;
+                this.onreload = onreload;
+
+                this.cts = new CancellationTokenSource();
             }
 
-            this.reload = new ConfigurationReloadToken();
-
-            this.watcher.Run();
-        }
-
-        public IEnumerable<string> GetChildKeys(IEnumerable<string> earlierKeys, string parentPath)
-        {
-            var configName = string.IsNullOrWhiteSpace(parentPath) ? string.Empty : parentPath + ConfigurationPath.KeyDelimiter;
-            var all = earlierKeys.Concat(from x in this.data
-                   where x.Key.StartsWith(configName)
-                   select Segment(x.Key, configName.Length)).Distinct();
-            return all;
-        }
-
-        public bool TryGet(string key, out string value)
-        {
-            JToken t;
-            if (!this.data.TryGetValue(key, out t) || !(t is JValue))
+            public void Run()
             {
-                value = null;
-                return false;
-            }
-
-            JValue v = (JValue)t;
-
-            var availableTokens = new[] { JTokenType.Boolean, JTokenType.Date, JTokenType.Float, JTokenType.Guid, JTokenType.Integer, JTokenType.Null, JTokenType.Raw, JTokenType.String, JTokenType.Uri };
-
-            if (!availableTokens.Contains(v.Type))
-            {
-                value = null;
-                return false;
-            }
-
-            value = v.Value.ToString();
-            return true;
-        }
-
-        public void Set(string key, string value)
-        {
-            throw new NotImplementedException();
-        }
-
-        public IChangeToken GetReloadToken()
-        {
-            var token = new ConfigurationReloadToken();
-            Interlocked.Exchange(ref this.reload, token);
-            return token;
-        }
-
-        public void Load()
-        {
-            var client = new HttpClient();
-            var request = client.GetAsync(this.uri + "/_all_docs?include_docs=true");
-            var s = request.Result.Content.ReadAsStringAsync().Result;
-
-            var json = JObject.Parse(s);
-            var newData = new Dictionary<string, JToken>();
-
-            this.EnterContext(this.databasename);
-            foreach (var t in json["rows"].Select(d => new { _id = d["id"].Value<string>(), doc = d["doc"] }))
-            {
-                var doc = t.doc;
-                switch (doc.Type)
+                if (this.running)
                 {
-                    case JTokenType.Object:
-                        var o = doc as JObject;
-
-                        this.EnterContext(t._id);
-                        this.VisitObject(o, newData);
-                        this.ExitContext();
-                        break;
-                }
-            }
-
-            this.ExitContext();
-
-            Interlocked.Exchange(ref this.data, newData);
-        }
-
-        public IConfigurationProvider Build(IConfigurationBuilder builder)
-        {
-            return this;
-        }
-
-        public void Dispose()
-        {
-            this.watcher?.Dispose();
-        }
-
-        private static string Segment(string key, int prefixLength)
-        {
-            var num = key.IndexOf(ConfigurationPath.KeyDelimiter, prefixLength, StringComparison.OrdinalIgnoreCase);
-            return num >= 0 ? key.Substring(prefixLength, num - prefixLength) : key.Substring(prefixLength);
-        }
-
-        private void VisitObject(JObject token, IDictionary<string, JToken> data)
-        {
-            foreach (var k in token.Properties())
-            {
-                if (k.Name[0] == '_')
-                {
-                    continue;
+                    return;
                 }
 
-                this.EnterContext(k.Name);
-                if (k.Value.Type == JTokenType.Object)
-                {
-                    this.VisitObject(k.Value as JObject, data);
-                }
-                else
-                {
-                    data[this.currentPath] = k.Value;
-                }
+                this.running = true;
 
-                this.ExitContext();
-            }
-        }
+                var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite) };
 
-        private void EnterContext(string ctx)
-        {
-            this.context.Push(ctx);
-            this.currentPath = ConfigurationPath.Combine(this.context.Reverse());
-        }
-
-        private void ExitContext()
-        {
-            this.context.Pop();
-            this.currentPath = ConfigurationPath.Combine(this.context.Reverse());
-        }
-
-        private static class CouchDbConfigWatcher
-        {
-            public static CouchDbChangeToken Get(string absoluteUrl, Action onreload)
-            {
-                return new CouchDbChangeToken(absoluteUrl, onreload);
+                Task.Factory.StartNew(async () => await ReaderContinuation(this.cts.Token, this.absoluteUrl, client, this.onreload), this.cts.Token);
             }
 
-            public class CouchDbChangeToken : IDisposable
+            public void Dispose()
             {
-                private readonly string absoluteUrl;
+                this.cts.Cancel(false);
+            }
 
-                private readonly Action onreload;
+            private static async Task ReaderContinuation(CancellationToken token, string absoluteUrl, HttpClient client, Action<string> reloadMethod)
+            {
+                var lastSeq = 0;
 
-                private readonly CancellationTokenSource cts;
+                CancellationTokenSource tks = null;
 
-                private bool running;
-
-                public CouchDbChangeToken(string absoluteUrl, Action onreload)
+                while (!token.IsCancellationRequested)
                 {
-                    this.absoluteUrl = absoluteUrl;
-                    this.onreload = onreload;
-
-                    this.cts = new CancellationTokenSource();
-                }
-
-                public void Run()
-                {
-                    if (this.running)
+                    StreamReader reader;
+                    try
                     {
-                        return;
+                        var msg = new HttpRequestMessage(HttpMethod.Get, absoluteUrl);
+                        var request = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, token);
+                        reader = new StreamReader(await request.Content.ReadAsStreamAsync());
+                    }
+                    catch
+                    {
+                        await Task.Delay(1000, token);
+                        continue;
                     }
 
-                    this.running = true;
-
-                    var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite) };
-
-                    Task.Factory.StartNew(async () => await ReaderContinuation(this.cts.Token, this.absoluteUrl, client, this.onreload), this.cts.Token);
-                }
-
-                public void Dispose()
-                {
-                    this.cts.Cancel(false);
-                }
-
-                private static async Task ReaderContinuation(CancellationToken token, string absoluteUrl, HttpClient client, Action reloadMethod)
-                {
-                    var lastSeq = 0;
-
-                    CancellationTokenSource tks = null;
-
-                    while (!token.IsCancellationRequested)
+                    using (reader)
                     {
-                        StreamReader reader;
-                        try
+                        while (true)
                         {
-                            var msg = new HttpRequestMessage(HttpMethod.Get, absoluteUrl);
-                            var request = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, token);
-                            reader = new StreamReader(await request.Content.ReadAsStreamAsync());
-                        }
-                        catch
-                        {
-                            await Task.Delay(1000, token);
-                            continue;
-                        }
-
-                        using (reader)
-                        {
-                            while (true)
+                            string s;
+                            try
                             {
-                                string s;
-                                try
-                                {
-                                    if (reader.EndOfStream)
-                                    {
-                                        break;
-                                    }
-
-                                    s = await reader.ReadLineAsync();
-                                }
-                                catch
+                                if (reader.EndOfStream)
                                 {
                                     break;
                                 }
 
-                                if (string.IsNullOrWhiteSpace(s))
-                                {
-                                    await Task.Delay(1000, token);
-                                    continue;
-                                }
+                                s = await reader.ReadLineAsync();
+                            }
+                            catch
+                            {
+                                break;
+                            }
 
-                                var obj = JObject.Parse(s);
-                                JToken val;
+                            if (string.IsNullOrWhiteSpace(s))
+                            {
+                                await Task.Delay(1000, token);
+                                continue;
+                            }
 
-                                if (obj.TryGetValue("seq", out val) && val.Value<int>() > lastSeq)
-                                {
-                                    lastSeq = val.Value<int>();
-                                    var reload = new CancellationTokenSource(500);
-                                    reload.Token.Register(reloadMethod);
-                                    Interlocked.Exchange(ref tks, reload)?.Dispose();
-                                }
+                            var obj = JObject.Parse(s);
+                            JToken val;
+
+                            if (obj.TryGetValue("seq", out val) && val.Value<int>() > lastSeq)
+                            {
+                                lastSeq = val.Value<int>();
+                                reloadMethod(obj["id"].Value<string>());
                             }
                         }
                     }
@@ -283,11 +126,148 @@
         }
     }
 
+    public class CouchDbFileProvider : IFileProvider
+    {
+        private readonly string host;
+
+        private readonly int port;
+
+        private readonly string database;
+
+        private readonly CouchDbConfigWatcher.CouchDbChangeToken watcher;
+
+        private readonly Subject<string> changes;
+
+        private HttpClient client;
+
+        public CouchDbFileProvider(string host, int port, string database)
+        {
+            this.host = host;
+            this.port = port;
+            this.database = database;
+            var uri = new Uri($"http://{host}:{port}/{database}");
+
+            this.client = new HttpClient { BaseAddress = uri };
+            
+
+            this.changes = new Subject<string>();
+
+            this.watcher = CouchDbConfigWatcher.Get(
+                  uri + "/_changes?feed=continuous",
+                  (s) =>
+                  {
+                      this.changes.OnNext("/" + s);
+                  });
+            this.watcher.Run();
+
+        }
+
+        public IFileInfo GetFileInfo(string subpath)
+        {
+            return new CouchFile(this.client, subpath);
+        }
+
+        public IDirectoryContents GetDirectoryContents(string subpath)
+        {
+            var jsonString = this.client.SendAsync(new HttpRequestMessage(HttpMethod.Get, this.client.BaseAddress + "/_all_docs")).Result.Content.ReadAsStringAsync().Result;
+            var json = JObject.Parse(jsonString);
+
+            var rows = json["rows"];
+
+            return new CouchFileContents(rows.Select(a=>new CouchFile(this.client, a["id"].Value<string>())));
+        }
+
+        private class CouchFileContents : IDirectoryContents
+        {
+            private readonly IEnumerable<CouchFile> files;
+
+            public CouchFileContents(IEnumerable<CouchFile> files)
+            {
+                this.files = files;
+                this.Exists = true;
+            }
+
+            public IEnumerator<IFileInfo> GetEnumerator() => this.files.GetEnumerator();
+
+            IEnumerator IEnumerable.GetEnumerator()
+            {
+                return this.GetEnumerator();
+            }
+
+            public bool Exists { get; }
+        }
+
+        public IChangeToken Watch(string filter) => new ReactiveExtensionsChangeToken(this.changes.Where(a => a == filter));
+
+        private class ReactiveExtensionsChangeToken : IChangeToken
+        {
+            private readonly IObservable<string> source;
+
+            public ReactiveExtensionsChangeToken(IObservable<string> source)
+            {
+                this.source = source;
+            }
+
+            public IDisposable RegisterChangeCallback(Action<object> callback, object state)
+            {
+                return this.source.Take(1).Subscribe(s => callback(state));
+            }
+
+            public bool HasChanged { get; }
+
+            public bool ActiveChangeCallbacks { get; }
+        }
+
+        private class CouchFile : IFileInfo
+        {
+            private readonly HttpClient client;
+
+            private readonly string docId;
+
+            private readonly Uri uri;
+
+            public CouchFile(HttpClient client, string docId)
+            {
+                this.client = client;
+                this.docId = docId;
+                this.Exists = true;
+                this.IsDirectory = false;
+                this.Name = docId;
+                this.PhysicalPath = docId.StartsWith("/") ? docId : "/" + docId;
+            }
+
+            public Stream CreateReadStream() => this.client.GetAsync(this.client.BaseAddress + this.PhysicalPath).Result.Content.ReadAsStreamAsync().Result;
+
+            public bool Exists { get; }
+
+            public long Length { get; }
+
+            public string PhysicalPath { get; }
+
+            public string Name { get; }
+
+            public DateTimeOffset LastModified { get; }
+
+            public bool IsDirectory { get; }
+        }
+    }
+
     public static class CouchDbProvider
     {
-        public static IConfigurationBuilder AddCouchDb(this IConfigurationBuilder builder, string host, int port, string database, bool reload = true)
+        public static IConfigurationBuilder AddCouchDb(this IConfigurationBuilder builder, string host, string database, int port = 5984, string document = null, bool reload = true)
         {
-            builder.Add(new CouchDbDatabaseConfigurationProvider(host, port, database, reload));
+            var fileProvider = new CouchDbFileProvider(host, port, database);
+            if (document != null)
+            {
+                builder.Add(new JsonConfigurationSource { FileProvider = fileProvider, Path = document, Optional = false, ReloadOnChange = reload });
+                return builder;
+            }
+
+            foreach (var f in fileProvider.GetDirectoryContents(string.Empty).Where(a => a.Exists && !a.IsDirectory))
+            {
+                builder.Add(new JsonConfigurationSource { FileProvider = fileProvider, Path = f.PhysicalPath, Optional = false, ReloadOnChange = reload });
+            }
+
             return builder;
         }
     }
